@@ -1,0 +1,522 @@
+#!/usr/bin/env ruby
+# ponytail: stdlib WEBrick — local proxies for CORS-blocked chain APIs
+require 'webrick'
+require 'net/http'
+require 'uri'
+require 'json'
+require 'cgi'
+require 'set'
+
+STAKE_PROGRAM = 'Stake11111111111111111111111111111111111112'
+MAINNET = URI('https://api.mainnet-beta.solana.com')
+PUBLIC = URI('https://solana.publicnode.com')
+RPC_UPSTREAMS = [MAINNET, PUBLIC].freeze
+SOL_ADDR_RE = /\A[1-9A-HJ-NP-Za-km-z]{32,44}\z/
+
+VOTE_VALIDATORS = {
+  '26pV97Ce83ZQ6Kz9XT4td8tdoUFPTng8Fb8gPyc53dJx' => {
+    'operator' => 'Ledger by Figment',
+    'url' => 'https://www.figment.io/staking/solana',
+  },
+  'CcaHc2L43ZWjwCHART3oZoJvHLAe9hzT2DJNUpBzoTN1' => {
+    'operator' => 'Figment',
+    'url' => 'https://www.figment.io/staking/solana',
+  },
+}.freeze
+
+def cors!(req, res)
+  res['Access-Control-Allow-Origin'] = req['Origin'] || '*'
+end
+
+def rpc_post(uri, body, read_timeout: 18)
+  http = Net::HTTP.new(uri.host, uri.port)
+  http.use_ssl = true
+  http.read_timeout = read_timeout
+  http.open_timeout = 6
+  req = Net::HTTP::Post.new(uri)
+  req['Content-Type'] = 'application/json'
+  req.body = body
+  res = http.request(req)
+  raise "HTTP #{res.code}" unless res.code.to_i < 500
+  JSON.parse(res.body)
+end
+
+def rpc_call_any(method, params, read_timeout: 18)
+  last_error = 'rpc_failed'
+  best = nil
+  RPC_UPSTREAMS.each do |uri|
+    result = rpc_call(uri, method, params, read_timeout: read_timeout)
+    if result.is_a?(Array)
+      return result unless result.empty?
+      best = result if best.nil?
+    elsif !result.nil?
+      return result
+    end
+  rescue StandardError => e
+    last_error = e.message
+    next
+  end
+  return best unless best.nil?
+  raise last_error
+end
+
+def rpc_call(uri, method, params, read_timeout: 18)
+  data = rpc_post(uri, JSON.generate(jsonrpc: '2.0', id: 1, method: method, params: params), read_timeout: read_timeout)
+  raise data.dig('error', 'message') || 'rpc_error' if data['error']
+  data['result']
+end
+
+def collect_stake_ix(ix, accounts)
+  parsed = ix['parsed']
+  return unless parsed
+  info = parsed['info'] || {}
+  type = parsed['type']
+  if %w[initialize delegate].include?(type) && info['stakeAccount']
+    accounts << info['stakeAccount']
+  elsif type == 'createAccountWithSeed' && info['owner'] == STAKE_PROGRAM && info['newAccount']
+    accounts << info['newAccount']
+  end
+end
+
+def extract_stake_accounts(tx)
+  accounts = Set.new
+  return accounts unless tx
+  (tx.dig('transaction', 'message', 'instructions') || []).each { |ix| collect_stake_ix(ix, accounts) }
+  (tx.dig('meta', 'innerInstructions') || []).each do |group|
+    (group['instructions'] || []).each { |ix| collect_stake_ix(ix, accounts) }
+  end
+  accounts
+end
+
+def from_lamports(raw)
+  n = raw.to_i
+  whole = n / 1_000_000_000
+  frac = n % 1_000_000_000
+  return whole.to_s if frac.zero?
+  frac_str = frac.to_s.rjust(9, '0').sub(/0+$/, '')
+  "#{whole}.#{frac_str}"
+end
+
+def stake_row(pubkey, info)
+  delegation = info&.dig('stake', 'delegation')
+  return nil unless delegation
+  lamports = delegation['stake'].to_i
+  return nil if lamports <= 0
+  amount = from_lamports(lamports)
+  voter = delegation['voter']
+  known = VOTE_VALIDATORS[voter]
+  {
+    'chain' => 'Solana',
+    'chainId' => 'solana',
+    'kind' => 'staking',
+    'symbol' => 'SOL',
+    'name' => 'Staked SOL',
+    'amount' => amount,
+    'amountNum' => amount.to_f,
+    'usd' => nil,
+    'usdEstimated' => false,
+    'icon' => nil,
+    'contract' => pubkey,
+    'validator' => known ? known['operator'] : voter,
+    'protocol' => 'Native stake',
+    'stakingUrl' => "https://solscan.io/account/#{pubkey}",
+    'validatorUrl' => known ? known['url'] : "https://solscan.io/account/#{voter}",
+  }
+end
+
+class SolanaStakeResolver
+  CACHE = {}
+  CACHE_MS = 5 * 60 * 1000
+  SIG_LIMIT = 40
+  MAX_SIG_PAGES = 5
+  BATCH = 1
+  # Delegate txs are often buried (not in the newest signatures); page-2 idx 0/3 matter too.
+  PRIORITY = [3, 8, 13, 21, 30, 40, 43, 4, 5, 6, 7, 9, 2, 1, 0, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 41, 42, 44, 45, 46, 47].freeze
+
+  def self.all_signatures(address)
+    sigs = []
+    before = nil
+    MAX_SIG_PAGES.times do
+      params = { limit: SIG_LIMIT }
+      params[:before] = before if before
+      page = rpc_call_any('getSignaturesForAddress', [address, params], read_timeout: 12)
+      break unless page.is_a?(Array) && page.any?
+      sigs.concat(page)
+      break if page.length < SIG_LIMIT
+      before = page.last['signature']
+    end
+    sigs
+  end
+
+  PRIORITY_SCAN = 24
+  TX_GAP = 0.35
+
+  def self.priority_sigs(sigs)
+    PRIORITY.first(PRIORITY_SCAN).map { |i| sigs[i] }.compact.uniq
+  end
+
+  def self.fetch_tx(entry)
+    2.times do |attempt|
+      return rpc_call_any('getTransaction', [
+        entry['signature'],
+        { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0 },
+      ], read_timeout: 24)
+    rescue StandardError
+      raise if attempt == 1
+      sleep TX_GAP * 2
+    end
+  end
+
+  def self.fetch_tx_batch(chunk)
+    chunk.map do |entry|
+      fetch_tx(entry)
+    rescue StandardError
+      nil
+    ensure
+      sleep TX_GAP
+    end
+  end
+
+  def self.rows_for(address)
+    hit = CACHE[address]
+    return hit[:rows] if hit && (Time.now.to_f * 1000 - hit[:ts]) < CACHE_MS
+
+    accounts = Set.new
+    sigs = all_signatures(address)
+    return [] unless sigs.any?
+
+    priority_sigs(sigs).each_slice(BATCH) do |chunk|
+      fetch_tx_batch(chunk).each do |tx|
+        extract_stake_accounts(tx).each { |pk| accounts << pk }
+      end
+    end
+
+    pubkeys = accounts.to_a
+    return [] if pubkeys.empty?
+
+    rows = []
+    pubkeys.each_slice(10) do |slice|
+      result = rpc_call_any('getMultipleAccounts', [slice, { encoding: 'jsonParsed' }], read_timeout: 14)
+      slice.each_with_index do |pk, i|
+        info = result.dig('value', i, 'data', 'parsed', 'info')
+        next unless info
+        auth = info.dig('meta', 'authorized') || {}
+        next unless auth['staker'] == address || auth['withdrawer'] == address
+        row = stake_row(pk, info)
+        rows << row if row
+      end
+    end
+    rows.sort_by! { |r| -r['amountNum'] }
+    CACHE[address] = { rows: rows, ts: Time.now.to_f * 1000 } if rows.any?
+    rows
+  end
+end
+
+class SolanaRpcProxy < WEBrick::HTTPServlet::AbstractServlet
+  READ_TIMEOUT = 28
+  OPEN_TIMEOUT = 6
+
+  def do_OPTIONS(req, res)
+    cors!(req, res)
+    res['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+    res['Access-Control-Allow-Headers'] = 'Content-Type'
+    res.status = 204
+  end
+
+  def do_POST(req, res)
+    cors!(req, res)
+    res['Content-Type'] = 'application/json'
+    body, status = forward(req.body)
+    res.status = status
+    res.body = body
+  end
+
+  private
+
+  def forward(body)
+    last_error = 'upstream_unavailable'
+    RPC_UPSTREAMS.each do |uri|
+      http = Net::HTTP.new(uri.host, uri.port)
+      http.use_ssl = true
+      http.read_timeout = READ_TIMEOUT
+      http.open_timeout = OPEN_TIMEOUT
+      upstream = Net::HTTP::Post.new(uri)
+      upstream['Content-Type'] = 'application/json'
+      upstream.body = body
+      reply = http.request(upstream)
+      code = reply.code.to_i
+      return [reply.body, code] if code >= 200 && code < 300
+      last_error = "HTTP #{code}"
+    rescue StandardError => e
+      last_error = e.message
+      next
+    end
+    [JSON.generate(jsonrpc: '2.0', error: { code: -32000, message: last_error }, id: nil), 503]
+  end
+end
+
+class SolanaStakeServlet < WEBrick::HTTPServlet::AbstractServlet
+  def do_OPTIONS(req, res)
+    cors!(req, res)
+    res['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+    res.status = 204
+  end
+
+  def do_GET(req, res)
+    cors!(req, res)
+    res['Content-Type'] = 'application/json'
+    address = req.query['address'].to_s.strip
+    unless SOL_ADDR_RE.match?(address)
+      res.status = 400
+      res.body = JSON.generate(error: 'invalid_address')
+      return
+    end
+    rows = SolanaStakeResolver.rows_for(address)
+    res.status = 200
+    res.body = JSON.generate(rows: rows)
+  rescue StandardError => e
+    res.status = 200
+    res.body = JSON.generate(rows: [], error: e.message)
+  end
+end
+
+class KoiosProxy < WEBrick::HTTPServlet::AbstractServlet
+  KOIOS = URI('https://api.koios.rest')
+
+  def do_OPTIONS(req, res)
+    cors!(req, res)
+    res['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+    res['Access-Control-Allow-Headers'] = 'Content-Type'
+    res.status = 204
+  end
+
+  def do_POST(req, res)
+    cors!(req, res)
+    res['Content-Type'] = 'application/json'
+    path = req.path_info.to_s
+    path = '/v1/address_info' if path.empty?
+    uri = URI("#{KOIOS}/api#{path}")
+    forward_post(uri, req.body, res)
+  rescue StandardError => e
+    res.status = 503
+    res.body = JSON.generate(error: e.message)
+  end
+end
+
+class CosmosProxy < WEBrick::HTTPServlet::AbstractServlet
+  BASE = URI('https://rest.cosmos.directory/cosmoshub')
+
+  def do_OPTIONS(req, res)
+    cors!(req, res)
+    res['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+    res.status = 204
+  end
+
+  def do_GET(req, res)
+    cors!(req, res)
+    path = req.path_info.to_s
+    path = '/' if path.empty?
+    uri = URI("#{BASE}#{path}")
+    uri.query = req.query_string unless req.query_string.to_s.empty?
+    forward_get(uri, res)
+  rescue StandardError => e
+    res.status = 503
+    res.body = JSON.generate(error: e.message)
+  end
+end
+
+class PolkadotRpcProxy < WEBrick::HTTPServlet::AbstractServlet
+  UPSTREAMS = [
+    URI('https://polkadot-rpc.publicnode.com'),
+    URI('https://polkadot.api.onfinality.io/public'),
+  ].freeze
+
+  def do_OPTIONS(req, res)
+    cors!(req, res)
+    res['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+    res['Access-Control-Allow-Headers'] = 'Content-Type'
+    res.status = 204
+  end
+
+  def do_POST(req, res)
+    cors!(req, res)
+    res['Content-Type'] = 'application/json'
+    body, status = forward_rpc(req.body)
+    res.status = status
+    res.body = body
+  end
+
+  private
+
+  def forward_rpc(body)
+    last_error = 'upstream_unavailable'
+    UPSTREAMS.each do |uri|
+      http = Net::HTTP.new(uri.host, uri.port)
+      http.use_ssl = true
+      http.read_timeout = 25
+      http.open_timeout = 6
+      upstream = Net::HTTP::Post.new(uri)
+      upstream['Content-Type'] = 'application/json'
+      upstream.body = body
+      reply = http.request(upstream)
+      code = reply.code.to_i
+      return [reply.body, code] if code >= 200 && code < 300
+      last_error = "HTTP #{code}"
+    rescue StandardError => e
+      last_error = e.message
+      next
+    end
+    [JSON.generate(jsonrpc: '2.0', error: { code: -32000, message: last_error }, id: nil), 503]
+  end
+end
+
+class PolkadotProxy < WEBrick::HTTPServlet::AbstractServlet
+  BASE = URI('https://polkadot-public-sidecar.parity-chains.parity.io')
+
+  def do_OPTIONS(req, res)
+    cors!(req, res)
+    res['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+    res.status = 204
+  end
+
+  def do_GET(req, res)
+    cors!(req, res)
+    path = req.path_info.to_s
+    path = '/' if path.empty?
+    uri = URI("#{BASE}#{path}")
+    uri.query = req.query_string unless req.query_string.to_s.empty?
+    forward_get(uri, res)
+  rescue StandardError => e
+    res.status = 503
+    res.body = JSON.generate(error: e.message)
+  end
+end
+
+class NearRpcProxy < WEBrick::HTTPServlet::AbstractServlet
+  NEAR = URI('https://rpc.mainnet.near.org')
+
+  def do_OPTIONS(req, res)
+    cors!(req, res)
+    res['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+    res['Access-Control-Allow-Headers'] = 'Content-Type'
+    res.status = 204
+  end
+
+  def do_POST(req, res)
+    cors!(req, res)
+    res['Content-Type'] = 'application/json'
+    forward_post(NEAR, req.body, res)
+  rescue StandardError => e
+    res.status = 503
+    res.body = JSON.generate(jsonrpc: '2.0', error: { code: -32000, message: e.message }, id: nil)
+  end
+end
+
+class CoinGeckoProxy < WEBrick::HTTPServlet::AbstractServlet
+  BASE = URI('https://api.coingecko.com')
+
+  def do_OPTIONS(req, res)
+    cors!(req, res)
+    res['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+    res.status = 204
+  end
+
+  def do_GET(req, res)
+    cors!(req, res)
+    path = req.path_info.to_s
+    uri = URI("#{BASE}#{path}")
+    uri.query = req.query_string unless req.query_string.to_s.empty?
+    forward_get(uri, res, accept: 'application/json')
+  rescue StandardError => e
+    res.status = 503
+    res.body = JSON.generate(error: e.message)
+  end
+end
+
+class EvmRpcProxy < WEBrick::HTTPServlet::AbstractServlet
+  CHAINS = {
+    'bsc' => URI('https://bsc.publicnode.com'),
+    'avax' => URI('https://avalanche-c-chain.publicnode.com'),
+  }.freeze
+
+  def do_OPTIONS(req, res)
+    cors!(req, res)
+    res['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+    res['Access-Control-Allow-Headers'] = 'Content-Type'
+    res.status = 204
+  end
+
+  def do_POST(req, res)
+    cors!(req, res)
+    res['Content-Type'] = 'application/json'
+    chain = req.query['chain']
+    chain = chain.first if chain.is_a?(Array)
+    chain = chain.to_s
+    if chain.empty?
+      qs = URI(req.request_uri).query.to_s
+      chain = CGI.parse(qs)['chain']&.first.to_s
+    end
+    uri = CHAINS[chain]
+    unless uri
+      res.status = 400
+      res.body = JSON.generate(error: 'unknown_chain')
+      return
+    end
+    forward_post(uri, req.body, res)
+  rescue StandardError => e
+    res.status = 503
+    res.body = JSON.generate(jsonrpc: '2.0', error: { code: -32000, message: e.message }, id: nil)
+  end
+end
+
+def forward_get(uri, res, accept: nil)
+  http = Net::HTTP.new(uri.host, uri.port)
+  http.use_ssl = true
+  http.read_timeout = 22
+  http.open_timeout = 6
+  req = Net::HTTP::Get.new(uri)
+  req['Accept'] = accept if accept
+  req['Accept-Encoding'] = 'identity'
+  reply = http.request(req)
+  res.status = reply.code.to_i
+  res['Content-Type'] = reply['Content-Type'] || 'application/json'
+  res.body = reply.body
+end
+
+def forward_post(uri, body, res)
+  http = Net::HTTP.new(uri.host, uri.port)
+  http.use_ssl = true
+  http.read_timeout = 22
+  http.open_timeout = 6
+  req = Net::HTTP::Post.new(uri)
+  req['Content-Type'] = 'application/json'
+  req['Accept-Encoding'] = 'identity'
+  req.body = body
+  reply = http.request(req)
+  res.status = reply.code.to_i
+  res['Content-Type'] = reply['Content-Type'] || 'application/json'
+  res.body = reply.body
+end
+
+port = (ARGV[0] || ENV['PORT'] || 8080).to_i
+root = File.expand_path(__dir__)
+bind = ENV['PORT'] ? '0.0.0.0' : '127.0.0.1'
+
+server = WEBrick::HTTPServer.new(
+  Port: port,
+  DocumentRoot: root,
+  BindAddress: bind,
+)
+server.mount '/api/solana-rpc', SolanaRpcProxy
+server.mount '/api/solana-stake', SolanaStakeServlet
+server.mount '/api/koios', KoiosProxy
+server.mount '/api/cosmos', CosmosProxy
+server.mount '/api/polkadot-rpc', PolkadotRpcProxy
+server.mount '/api/polkadot', PolkadotProxy
+server.mount '/api/near-rpc', NearRpcProxy
+server.mount '/api/coingecko', CoinGeckoProxy
+server.mount '/api/evm-rpc', EvmRpcProxy
+
+trap('INT') { server.shutdown }
+puts "Find My Crypto → http://127.0.0.1:#{port}/"
+server.start
