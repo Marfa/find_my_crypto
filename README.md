@@ -1,13 +1,81 @@
 # Find My Crypto
 
-> **Документация:** [README.ru.md](README.ru.md) (основная) · [README.en.md](README.en.md)
+**Сайт:** [https://marfa.github.io/find_my_crypto/](https://marfa.github.io/find_my_crypto/)
 
-Кратко: статический сайт для поиска застейканных монет и данных о валидаторе по адресу кошелька.
+**Find My Crypto** — статический сайт для быстрого поиска **застейканных монет** и отображения **валидатора** по адресу кошелька.
+
+Без сборки, без npm — [ponytail](https://github.com/DietrichGebert/ponytail)-стиль. Код подготовлен с помощью [Cursor](https://cursor.com).
+
+**Лицензия:** [CC BY-NC-SA 4.0 International](https://creativecommons.org/licenses/by-nc-sa/4.0/) — некоммерческое использование с указанием авторства; производные работы на тех же условиях.
+
+English: [README.en.md](README.en.md) · подробнее: [README.ru.md](README.ru.md)
+
+## Возможности
+
+- Поиск по **EVM** (`0x…`), **Solana**, **Cardano** (`addr1` / `stake1`), **Cosmos**, **NEAR**, **Polkadot**
+- Таблица: токен, сумма, USD, колонка **«Валидатор»** (для стейкинга — название + ссылка)
+- Несколько делегаций к одному валидатору (например Solana) **объединяются в одну строку**
+- Светлая / тёмная тема в стиле crypto/ICO landing, **RU / EN**
+- Топ-10 монет в подвале: ETH, SOL, ADA, BNB, AVAX, DOT, POL, ATOM, NEAR, GNO
+
+### Сети и источники
+
+| Сеть | Источник |
+|------|----------|
+| Ethereum, Base, Optimism, Arbitrum, Polygon, Gnosis | [Blockscout](https://www.blockscout.com/) |
+| BNB Chain, Avalanche C-Chain | публичный RPC |
+| Solana (токены + native stake) | Jupiter, RPC + `/api/solana-stake` |
+| Cardano | [Koios](https://api.koios.rest/) |
+| Cosmos Hub | Cosmos REST |
+| NEAR | NEAR RPC |
+| Polkadot | Polkadot RPC |
+
+Optimism API: `explorer.optimism.io` (старый `optimism.blockscout.com` отдаёт 301 без CORS).
+
+USD: Blockscout, Jupiter, CoinGecko на момент запроса.
+
+## Локально
 
 ```bash
-cd findmycrypto && ruby serve
+cd findmycrypto
+ruby serve
 ```
 
-Откройте http://127.0.0.1:8080
+http://127.0.0.1:8080 · проверка: `/check.html` → `ok`
 
-Лицензия: [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) · код подготовлен [Cursor](https://cursor.com)
+**Примеры**
+
+- EVM: `0xf03b7a98808230eeb7cc035d953e56d46df93da5`
+- Solana (7× stake): `DHSWRUWsYoDEMMjUajDGLgbkCEsf16k5rDCRt8QPZv7k`
+- Cardano: `addr1q8909sa0jafrg0uqhc8dwgh0g7j78qt956frmclcmw4jpux9k4s36j4tlqp0nepjdgsgpas4uydh6g3upa7z45mg82eqgfmv4n`
+
+## Production
+
+| Компонент | URL |
+|-----------|-----|
+| Сайт (GitHub Pages) | [marfa.github.io/find_my_crypto](https://marfa.github.io/find_my_crypto/) |
+| API-прокси (Render) | [find-my-crypto-api.onrender.com](https://find-my-crypto-api.onrender.com) |
+
+На GitHub Pages в `index.html` задан `fmc-api-base` → Render-прокси для Solana stake, Koios, Cosmos, NEAR, Polkadot.
+
+## Обратная связь
+
+[Issues](https://github.com/Marfa/find_my_crypto/issues) · донаты в подвале сайта.
+
+## Структура
+
+```
+index.html
+serve, render.yaml, Gemfile
+assets/
+  lookup.js, solana-lookup.js, native-lookup.js
+  row-merge.js, staking-resolve.js
+  fetch-proxy.js, app.js, i18n.js, style.css
+```
+
+## Ограничения
+
+- Solana stake через историю tx, не `getProgramAccounts`.
+- USD для receipt-токенов без листинга — оценка по курсу нативной монеты.
+- ES modules требуют HTTP-сервера.
+- Render free tier: cold start ~30–60 с после простоя.

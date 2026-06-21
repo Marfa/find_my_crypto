@@ -1,5 +1,7 @@
 # Find My Crypto
 
+**Сайт:** [https://marfa.github.io/find_my_crypto/](https://marfa.github.io/find_my_crypto/)
+
 **Find My Crypto** — статический сайт для быстрого поиска **застейканных монет** и отображения **валидатора** по адресу кошелька.
 
 Без сборки, без npm — [ponytail](https://github.com/DietrichGebert/ponytail)-стиль. Код подготовлен с помощью [Cursor](https://cursor.com).
@@ -51,11 +53,16 @@ http://127.0.0.1:8080 · проверка: `/check.html` → `ok`
 
 Без Ruby `serve` CORS блокирует Koios, Cosmos, NEAR, Polkadot, Solana stake. EVM (Blockscout) обычно работает.
 
+Production:
+
+- Сайт: [marfa.github.io/find_my_crypto](https://marfa.github.io/find_my_crypto/)
+- Прокси: [find-my-crypto-api.onrender.com](https://find-my-crypto-api.onrender.com)
+
 1. Разверните `serve` на [Render](https://render.com) (`render.yaml`).
-2. В `index.html` раскомментируйте:
+2. В `index.html` укажите:
 
 ```html
-<meta name="fmc-api-base" content="https://your-api.onrender.com" />
+<meta name="fmc-api-base" content="https://find-my-crypto-api.onrender.com" />
 ```
 
 ### Бесплатный хостинг прокси

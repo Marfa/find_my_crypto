@@ -3,8 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="dark light" />
     <title>Find My Crypto</title>
+    <script>
+      (function () {
+        var mode = localStorage.getItem('fmc-theme') || 'auto';
+        var dark =
+          mode === 'dark' ||
+          (mode === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+      })();
+    </script>
     <!-- Optional: proxy for GitHub Pages — see README.ru.md -->
     <meta name="fmc-api-base" content="https://find-my-crypto-api.onrender.com" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
