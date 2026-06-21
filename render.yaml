@@ -4,6 +4,6 @@ services:
     name: find-my-crypto-api
     runtime: ruby
     plan: free
-    buildCommand: echo "no build"
-    startCommand: ruby serve
-    healthCheckPath: /check.html
+    buildCommand: bundle install
+    startCommand: bundle exec ruby serve
+    healthCheckPath: /health
