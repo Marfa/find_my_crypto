@@ -2,12 +2,14 @@ import { init, t, locale, apply, currentLang } from './i18n.js';
 import { init as initTheme } from './theme.js';
 import { mountToolbar, refreshToolbar } from './controls.js';
 import { sourcesHtml } from './sources.js';
+import { warmProxy } from './fetch-proxy.js';
 import {
   lookupWallet, formatUsd, formatAmount, sortRows, detectAddressType, normalizeAddress,
 } from './lookup.js';
 
 init();
 initTheme();
+warmProxy();
 mountToolbar(document.getElementById('toolbar'), { t });
 
 const form = document.getElementById('search-form');

@@ -103,6 +103,21 @@ export function solanaStakeUrl(address) {
   return `${base}/api/solana-stake?address=${encodeURIComponent(address)}`;
 }
 
+let warmPromise;
+
+/** Wake Render/local proxy so the first stake lookup is not lost to cold start. */
+export function warmProxy(signal) {
+  const base = proxyBase();
+  if (!base) return Promise.resolve();
+  if (warmPromise) return warmPromise;
+  warmPromise = fetch(`${base}/health`, { signal })
+    .catch(() => {})
+    .finally(() => {
+      setTimeout(() => { warmPromise = null; }, 60000);
+    });
+  return warmPromise;
+}
+
 export async function fetchJson(url, signal) {
   const res = await fetch(url, { signal });
   if (!res.ok) throw new Error(`http_${res.status}`);

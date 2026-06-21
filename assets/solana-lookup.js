@@ -1,6 +1,6 @@
 /** ponytail: Solana — Jupiter holdings + queued local RPC proxy for native stake */
 import { enrichStakingRows, isStakingAssetToken, inferFromToken } from './staking-resolve.js';
-import { solanaRpcUrl, solanaStakeUrl } from './fetch-proxy.js';
+import { solanaRpcUrl, solanaStakeUrl, warmProxy } from './fetch-proxy.js';
 
 const TOKEN_PROGRAM = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
 const STAKE_PROGRAM = 'Stake11111111111111111111111111111111111112';
@@ -15,7 +15,9 @@ const SIG_FETCH_MS = 15000;
 const TX_BATCH_MS = 22000;
 const TX_BATCH_SIZE = 1;
 const RPC_TIMEOUT_MS = 15000;
-const STAKE_SERVER_TIMEOUT_MS = 28000;
+const STAKE_SERVER_TIMEOUT_MS = 45000;
+const STAKE_SERVER_RETRIES = 2;
+const STAKE_SERVER_RETRY_GAP_MS = 2500;
 const STAKE_SIG_PRIORITY = [3, 8, 13, 21, 30, 40, 43, 4, 5, 6, 7, 9, 2, 1, 0, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 41, 42, 44, 45, 46, 47];
 
 function orderedStakeSigs(sigs) {
@@ -310,18 +312,40 @@ async function fetchSolPrice(signal) {
   }
 }
 
-async function fetchStakeFromServer(address, signal) {
+async function fetchStakeFromServerAttempt(address, signal) {
   const url = solanaStakeUrl(address);
-  if (!url) return null;
+  if (!url) return { fail: true };
   const reqSignal = mergeAbortSignals(signal, stakeServerTimeoutSignal(STAKE_SERVER_TIMEOUT_MS));
   try {
     const res = await fetch(url, { signal: reqSignal });
-    if (!res.ok) return null;
+    if (!res.ok) return { fail: true };
     const data = await res.json();
-    return Array.isArray(data.rows) ? data.rows : null;
+    if (!Array.isArray(data.rows)) return { fail: true };
+    if (data.rows.length) return { ok: true, rows: data.rows };
+    if (data.error) return { fail: true };
+    return { ok: true, rows: [] };
   } catch {
-    return null;
+    return { fail: true };
   }
+}
+
+async function fetchStakeFromServer(address, signal) {
+  const cached = getStakeCache(address);
+  if (cached?.length) return cached;
+
+  if (!solanaStakeUrl(address)) return null;
+
+  await warmProxy(signal).catch(() => {});
+
+  for (let attempt = 0; attempt < STAKE_SERVER_RETRIES; attempt += 1) {
+    if (attempt > 0) await pause(STAKE_SERVER_RETRY_GAP_MS, signal);
+    const result = await fetchStakeFromServerAttempt(address, signal);
+    if (result.ok) {
+      if (result.rows.length) setStakeCache(address, result.rows);
+      return result.rows;
+    }
+  }
+  return null;
 }
 
 async function fetchMintMeta(mint, signal) {
@@ -482,6 +506,7 @@ async function scanNativeStake(address, solPrice, signal) {
       usd: solPrice != null ? row.amountNum * solPrice : row.usd,
     }));
   }
+  if (Array.isArray(serverRows)) return [];
   if (stakeServerConfigured()) return [];
   return findStakeRowsFromHistory(address, solPrice, signal).catch(() => []);
 }
@@ -560,13 +585,16 @@ export async function lookupSolanaAddress(address, { signal } = {}) {
   const addr = String(address).trim();
   const usedSources = new Set(['solanaRpc']);
   const tokenSources = new Set();
+  const warm = warmProxy(signal);
 
-  const [lamports, solPrice, stakeRows, tokenRows] = await Promise.all([
+  const [lamports, solPrice, tokenRows] = await Promise.all([
     rpcCall('getBalance', [addr], signal, rpcBalanceUrls()),
     fetchSolPrice(signal),
-    scanNativeStake(addr, null, signal),
     scanTokens(addr, null, signal, tokenSources),
   ]);
+
+  await warm.catch(() => {});
+  const stakeRows = await scanNativeStake(addr, solPrice, signal);
 
   tokenSources.forEach((s) => usedSources.add(s));
   if (solPrice != null) usedSources.add('jupiter');
