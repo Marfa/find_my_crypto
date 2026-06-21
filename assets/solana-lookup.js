@@ -8,12 +8,14 @@ const STAKE_PROGRAM = 'Stake11111111111111111111111111111111111112';
 const RPC_BALANCE = ['https://solana.publicnode.com', 'https://api.mainnet-beta.solana.com'];
 const RPC_READ = ['https://solana.publicnode.com', 'https://api.mainnet-beta.solana.com'];
 
-const STAKE_BUDGET_MS = 90000;
+const STAKE_BUDGET_MS = 45000;
 const SIG_LIMIT = 40;
 const SIG_PAGES = 5;
 const SIG_FETCH_MS = 15000;
 const TX_BATCH_MS = 22000;
 const TX_BATCH_SIZE = 1;
+const RPC_TIMEOUT_MS = 15000;
+const STAKE_SERVER_TIMEOUT_MS = 28000;
 const STAKE_SIG_PRIORITY = [3, 8, 13, 21, 30, 40, 43, 4, 5, 6, 7, 9, 2, 1, 0, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 41, 42, 44, 45, 46, 47];
 
 function orderedStakeSigs(sigs) {
@@ -88,6 +90,39 @@ function rpcIndexUrls() {
   return RPC_READ;
 }
 
+function rpcBalanceUrls() {
+  const proxy = solanaRpcUrl();
+  if (proxy.includes('/api/solana-rpc')) return [proxy, ...RPC_BALANCE];
+  return RPC_BALANCE;
+}
+
+function stakeServerConfigured() {
+  return Boolean(solanaStakeUrl('11111111111111111111111111111111'));
+}
+
+function mergeAbortSignals(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  const ctrl = new AbortController();
+  const onAbort = () => ctrl.abort();
+  if (a.aborted || b.aborted) {
+    ctrl.abort();
+    return ctrl.signal;
+  }
+  a.addEventListener('abort', onAbort, { once: true });
+  b.addEventListener('abort', onAbort, { once: true });
+  return ctrl.signal;
+}
+
+function stakeServerTimeoutSignal(ms) {
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+    return AbortSignal.timeout(ms);
+  }
+  const ctrl = new AbortController();
+  setTimeout(() => ctrl.abort(), ms);
+  return ctrl.signal;
+}
+
 function pause(ms, signal) {
   return new Promise((resolve, reject) => {
     const t = setTimeout(resolve, ms);
@@ -117,7 +152,11 @@ async function rpcCall(method, params, signal, urls = RPC_READ, attempt = 0) {
   let lastErr;
   for (const url of urls) {
     try {
-      const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal });
+      const res = await withTimeout(
+        fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal }),
+        RPC_TIMEOUT_MS,
+        signal,
+      );
       if (res.status === 429) throw new RateLimitedError();
       if (res.status === 503 && attempt < 1) {
         await pause(RPC_RETRY_MS, signal);
@@ -164,7 +203,11 @@ async function rpcCallBatch(requests, signal, urls = rpcIndexUrls(), attempt = 0
   let lastErr;
   for (const url of urls) {
     try {
-      const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal });
+      const res = await withTimeout(
+        fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal }),
+        RPC_TIMEOUT_MS,
+        signal,
+      );
       if (res.status === 429) throw new RateLimitedError();
       if (res.status === 503 && attempt < 1) {
         await pause(RPC_RETRY_MS, signal);
@@ -270,8 +313,9 @@ async function fetchSolPrice(signal) {
 async function fetchStakeFromServer(address, signal) {
   const url = solanaStakeUrl(address);
   if (!url) return null;
+  const reqSignal = mergeAbortSignals(signal, stakeServerTimeoutSignal(STAKE_SERVER_TIMEOUT_MS));
   try {
-    const res = await fetch(url, { signal });
+    const res = await fetch(url, { signal: reqSignal });
     if (!res.ok) return null;
     const data = await res.json();
     return Array.isArray(data.rows) ? data.rows : null;
@@ -438,6 +482,7 @@ async function scanNativeStake(address, solPrice, signal) {
       usd: solPrice != null ? row.amountNum * solPrice : row.usd,
     }));
   }
+  if (stakeServerConfigured()) return [];
   return findStakeRowsFromHistory(address, solPrice, signal).catch(() => []);
 }
 
@@ -514,8 +559,16 @@ export async function lookupSolanaAddress(address, { signal } = {}) {
   bindAbortReset(signal);
   const addr = String(address).trim();
   const usedSources = new Set(['solanaRpc']);
-  const lamports = await rpcCall('getBalance', [addr], signal, RPC_BALANCE);
-  const solPrice = await fetchSolPrice(signal);
+  const tokenSources = new Set();
+
+  const [lamports, solPrice, stakeRows, tokenRows] = await Promise.all([
+    rpcCall('getBalance', [addr], signal, rpcBalanceUrls()),
+    fetchSolPrice(signal),
+    scanNativeStake(addr, null, signal),
+    scanTokens(addr, null, signal, tokenSources),
+  ]);
+
+  tokenSources.forEach((s) => usedSources.add(s));
   if (solPrice != null) usedSources.add('jupiter');
   const rows = [];
 
@@ -539,10 +592,11 @@ export async function lookupSolanaAddress(address, { signal } = {}) {
     });
   }
 
-  if (solPrice != null) usedSources.add('jupiter');
-  const stakeRows = await scanNativeStake(addr, solPrice, signal);
-  const tokenRows = await scanTokens(addr, solPrice, signal, usedSources);
-  rows.push(...stakeRows, ...tokenRows);
+  const pricedStakeRows = stakeRows.map((row) => ({
+    ...row,
+    usd: solPrice != null ? row.amountNum * solPrice : row.usd,
+  }));
+  rows.push(...pricedStakeRows, ...tokenRows);
 
   await enrichStakingRows(rows, signal);
 

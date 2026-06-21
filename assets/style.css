@@ -1,5 +1,4 @@
 :root {
-  color-scheme: dark light;
   --font: 'Exo 2', system-ui, -apple-system, sans-serif;
   --font-display: 'Rajdhani', 'Exo 2', sans-serif;
   --radius: 12px;
@@ -10,6 +9,7 @@
 
 [data-theme='dark'],
 :root {
+  color-scheme: dark;
   --bg: #070b1a;
   --bg-accent-1: #1a0f3d;
   --bg-accent-2: #0a2a4a;
@@ -29,6 +29,7 @@
 }
 
 [data-theme='light'] {
+  color-scheme: light;
   --bg: #eef1f8;
   --bg-accent-1: #ddd6fe;
   --bg-accent-2: #bfdbfe;
