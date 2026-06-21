@@ -1,0 +1,9 @@
+# Deploy API proxy on Render (free tier). See README for fmc-api-base on GitHub Pages.
+services:
+  - type: web
+    name: find-my-crypto-api
+    runtime: ruby
+    plan: free
+    buildCommand: echo "no build"
+    startCommand: ruby serve
+    healthCheckPath: /check.html

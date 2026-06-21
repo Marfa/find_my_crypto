@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Find My Crypto</title>
+    <!-- Optional: proxy for GitHub Pages — see README.ru.md -->
+    <!-- <meta name="fmc-api-base" content="https://your-api.onrender.com" /> -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Exo+2:wght@400;500;600;700&family=Rajdhani:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="favicon.png" type="image/png" sizes="512x512" />
+    <link rel="apple-touch-icon" href="favicon.png" />
+    <link rel="stylesheet" href="assets/style.css" />
+  </head>
+  <body>
+    <div class="bg-grid" aria-hidden="true"></div>
+    <div class="wrap">
+      <header class="site-header">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">FM</div>
+          <div>
+            <h1><a href="index.html" class="site-link" data-i18n="site">Find My Crypto</a></h1>
+            <p class="tagline" data-i18n="tagline">Enter a wallet address</p>
+          </div>
+        </div>
+        <div class="controls" id="toolbar"></div>
+      </header>
+
+      <form id="search-form" class="search-box card" autocomplete="off">
+        <label class="hidden" for="address" data-i18n="address">Wallet address</label>
+        <input
+          id="address"
+          name="address"
+          type="text"
+          spellcheck="false"
+          autocapitalize="off"
+          data-i18n-ph="addressPh"
+          placeholder="0x…"
+          required
+        />
+        <button type="submit" id="submit-btn" data-i18n="search">Search</button>
+      </form>
+
+      <div id="message" class="msg hidden" role="alert"></div>
+
+      <section id="summary" class="card hidden">
+        <div class="meta-row">
+          <div class="stat">
+            <strong data-i18n="total">Estimated total</strong>
+            <span class="stat-value" id="total-usd">—</span>
+          </div>
+          <div class="stat">
+            <strong data-i18n="networks">Networks</strong>
+            <span class="stat-value" id="networks">—</span>
+          </div>
+        </div>
+      </section>
+
+      <section id="results" class="card hidden">
+        <div class="table-toolbar">
+          <label class="filter-label">
+            <input type="checkbox" id="hide-small" />
+            <span data-i18n="hideSmall">Hide tokens below</span>
+            $<input type="number" id="hide-threshold" value="1" min="0" step="0.01" class="threshold-input" />
+          </label>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="sortable" data-sort="token" data-i18n="token">Token</th>
+                <th class="sortable" data-sort="amount" data-i18n="amount">Amount</th>
+                <th class="sortable sorted" data-sort="usd" data-dir="desc" data-i18n="usd">USD</th>
+                <th class="sortable" data-sort="validator" data-i18n="validatorExchange">Validator</th>
+              </tr>
+            </thead>
+            <tbody id="tbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <footer>
+        <div id="footer-sources" class="hidden"></div>
+        <div data-supported-coins></div>
+        <p class="footer-actions">
+          <a
+            href="https://github.com/Marfa/find_my_crypto/issues"
+            class="btn btn-secondary btn-sm report-link"
+            target="_blank"
+            rel="noopener noreferrer"
+            data-i18n="reportIssue"
+            >Report an issue</a
+          >
+        </p>
+        <p class="footer-meta hidden" id="footer-note" data-i18n-html="footerNoteHtml"></p>
+        <p class="footer-legal" data-i18n-html="footerLegalHtml"></p>
+      </footer>
+    </div>
+    <script type="module" src="assets/app.js"></script>
+  </body>
+</html>

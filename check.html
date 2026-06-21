@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Find My Crypto — self-check</title>
+  </head>
+  <body>
+    <h1><a href="index.html">Find My Crypto</a></h1>
+    <pre id="out">Running…</pre>
+    <script type="module">
+      import { selfCheck } from './assets/lookup.js';
+      import { selfCheckStakingResolve } from './assets/staking-resolve.js';
+      import { selfCheckSolana } from './assets/solana-lookup.js';
+      import { selfCheckAddressDetect } from './assets/address-detect.js';
+      import { selfCheckNativeLookup } from './assets/native-lookup.js';
+      import { selfCheckCardanoAddress } from './assets/cardano-address.js';
+      import { mergeStakingRows } from './assets/row-merge.js';
+      import { selfCheckPolkadotRpc } from './assets/polkadot-rpc.js';
+      selfCheck();
+      selfCheckStakingResolve();
+      selfCheckSolana();
+      selfCheckAddressDetect();
+      selfCheckNativeLookup();
+      selfCheckCardanoAddress();
+      selfCheckPolkadotRpc();
+      const merged = mergeStakingRows([
+        { kind: 'staking', chainId: 'solana', symbol: 'SOL', validator: 'Figment', amountNum: 10, amount: '10', usd: 100 },
+        { kind: 'staking', chainId: 'solana', symbol: 'SOL', validator: 'Figment', amountNum: 15.73, amount: '15.73', usd: 200 },
+      ]);
+      console.assert(merged.length === 1 && merged[0].amountNum === 25.73, 'merge same validator');
+      document.getElementById('out').textContent = 'ok';
+    </script>
+  </body>
+</html>
