@@ -6,6 +6,9 @@ import { warmProxy } from './fetch-proxy.js';
 import {
   lookupWallet, formatUsd, formatAmount, sortRows, detectAddressType, normalizeAddress,
 } from './lookup.js';
+import { mergeStakingRows } from './row-merge.js';
+import { enrichStakingRows } from './staking-resolve.js';
+import { followSolanaStake, hasNativeSolStake } from './solana-lookup.js';
 
 init();
 initTheme();
@@ -49,10 +52,10 @@ function hideSearchSlow() {
   searchSlow?.classList.add('hidden');
 }
 
-function armSearchSlowHint() {
+function armSearchSlowHint(force = false) {
   hideSearchSlow();
   searchSlowTimer = setTimeout(() => {
-    if (!submitBtn.disabled) return;
+    if (!force && !submitBtn.disabled) return;
     searchSlow.textContent = t('searchSlow');
     searchSlow.classList.remove('hidden');
   }, 5000);
@@ -135,6 +138,49 @@ function showSources(ids) {
   footerNote?.classList.remove('hidden');
 }
 
+function showResults(data) {
+  allRows = data.rows;
+  currentAddress = data.address;
+
+  if (!allRows.length) {
+    summary.classList.add('hidden');
+    results.classList.add('hidden');
+    showMessage(t('noResults'), 'warn');
+    showSources(data.sourcesUsed || []);
+    return null;
+  }
+
+  document.getElementById('networks').textContent = data.chainsHit.join(', ') || '—';
+  renderTable();
+  summary.classList.remove('hidden');
+  results.classList.remove('hidden');
+  showSources(data.sourcesUsed || []);
+  history.replaceState(null, '', `?address=${encodeURIComponent(data.address)}`);
+  return data;
+}
+
+async function finishSolanaStakeFollowUp(address, solPrice, signal) {
+  if (detectAddressType(address) !== 'solana' || hasNativeSolStake(allRows)) return;
+
+  armSearchSlowHint(true);
+  try {
+    const stakeRows = await followSolanaStake(address, solPrice, signal);
+    if (signal.aborted || !stakeRows.length || hasNativeSolStake(allRows)) return;
+
+    const rest = allRows.filter(
+      (r) => !(r.chainId === 'solana' && r.kind === 'staking' && r.protocol === 'Native stake'),
+    );
+    allRows = mergeStakingRows([...rest, ...stakeRows]);
+    await enrichStakingRows(allRows, signal);
+    allRows.sort((a, b) => (b.usd ?? -1) - (a.usd ?? -1));
+    renderTable();
+  } catch (e) {
+    if (e.name !== 'AbortError') return;
+  } finally {
+    hideSearchSlow();
+  }
+}
+
 async function runSearch(address) {
   hideMessage();
   hideSearchSlow();
@@ -146,26 +192,10 @@ async function runSearch(address) {
   submitBtn.innerHTML = `<span class="spinner"></span> ${t('searching')}`;
   armSearchSlowHint();
 
+  let followUp = null;
   try {
     const data = await lookupWallet(address, { signal: abort.signal });
-    allRows = data.rows;
-    currentAddress = data.address;
-
-    if (!allRows.length) {
-      summary.classList.add('hidden');
-      results.classList.add('hidden');
-      showMessage(t('noResults'), 'warn');
-      showSources(data.sourcesUsed || []);
-      return;
-    }
-
-    document.getElementById('networks').textContent = data.chainsHit.join(', ') || '—';
-    renderTable();
-    summary.classList.remove('hidden');
-    results.classList.remove('hidden');
-    showSources(data.sourcesUsed || []);
-
-    history.replaceState(null, '', `?address=${encodeURIComponent(data.address)}`);
+    followUp = showResults(data);
   } catch (e) {
     if (e.name === 'AbortError') return;
     summary.classList.add('hidden');
@@ -176,6 +206,10 @@ async function runSearch(address) {
     hideSearchSlow();
     submitBtn.disabled = false;
     submitBtn.textContent = t('search');
+  }
+
+  if (followUp) {
+    await finishSolanaStakeFollowUp(followUp.address, followUp.ethRates?.solana, abort.signal);
   }
 }
 

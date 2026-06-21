@@ -15,9 +15,9 @@ const SIG_FETCH_MS = 15000;
 const TX_BATCH_MS = 22000;
 const TX_BATCH_SIZE = 1;
 const RPC_TIMEOUT_MS = 15000;
-const STAKE_SERVER_TIMEOUT_MS = 45000;
-const STAKE_SERVER_RETRIES = 2;
-const STAKE_SERVER_RETRY_GAP_MS = 2500;
+const STAKE_POLL_INTERVAL_MS = 2500;
+const STAKE_POLL_MAX_MS = 120000;
+const STAKE_ATTEMPT_TIMEOUT_MS = 22000;
 const STAKE_SIG_PRIORITY = [3, 8, 13, 21, 30, 40, 43, 4, 5, 6, 7, 9, 2, 1, 0, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 41, 42, 44, 45, 46, 47];
 
 function orderedStakeSigs(sigs) {
@@ -315,7 +315,7 @@ async function fetchSolPrice(signal) {
 async function fetchStakeFromServerAttempt(address, signal) {
   const url = solanaStakeUrl(address);
   if (!url) return { fail: true };
-  const reqSignal = mergeAbortSignals(signal, stakeServerTimeoutSignal(STAKE_SERVER_TIMEOUT_MS));
+  const reqSignal = mergeAbortSignals(signal, stakeServerTimeoutSignal(STAKE_ATTEMPT_TIMEOUT_MS));
   try {
     const res = await fetch(url, { signal: reqSignal });
     if (!res.ok) return { fail: true };
@@ -329,21 +329,24 @@ async function fetchStakeFromServerAttempt(address, signal) {
   }
 }
 
-async function fetchStakeFromServer(address, signal) {
+/** Poll Render stake API until rows arrive, empty is confirmed, or deadline. */
+async function fetchStakeFromServerPoll(address, signal, maxMs = STAKE_POLL_MAX_MS) {
   const cached = getStakeCache(address);
   if (cached?.length) return cached;
-
   if (!solanaStakeUrl(address)) return null;
 
   await warmProxy(signal).catch(() => {});
 
-  for (let attempt = 0; attempt < STAKE_SERVER_RETRIES; attempt += 1) {
-    if (attempt > 0) await pause(STAKE_SERVER_RETRY_GAP_MS, signal);
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const result = await fetchStakeFromServerAttempt(address, signal);
-    if (result.ok) {
-      if (result.rows.length) setStakeCache(address, result.rows);
+    if (result.ok && result.rows.length) {
+      setStakeCache(address, result.rows);
       return result.rows;
     }
+    if (result.ok) return [];
+    await pause(STAKE_POLL_INTERVAL_MS, signal);
   }
   return null;
 }
@@ -499,16 +502,36 @@ async function findStakeRowsFromHistory(address, solPrice, signal) {
 }
 
 async function scanNativeStake(address, solPrice, signal) {
-  const serverRows = await fetchStakeFromServer(address, signal);
-  if (serverRows?.length) {
-    return serverRows.map((row) => ({
+  const cached = getStakeCache(address);
+  if (cached?.length) {
+    return cached.map((row) => ({
       ...row,
       usd: solPrice != null ? row.amountNum * solPrice : row.usd,
     }));
   }
-  if (Array.isArray(serverRows)) return [];
   if (stakeServerConfigured()) return [];
   return findStakeRowsFromHistory(address, solPrice, signal).catch(() => []);
+}
+
+function priceStakeRows(rows, solPrice) {
+  return rows.map((row) => ({
+    ...row,
+    usd: solPrice != null ? row.amountNum * solPrice : row.usd,
+  }));
+}
+
+/** Background poll after first paint — Render cold start often finishes after the first HTTP attempt. */
+export async function followSolanaStake(address, solPrice, signal) {
+  if (!stakeServerConfigured()) return [];
+  const cached = getStakeCache(address);
+  if (cached?.length) return priceStakeRows(cached, solPrice);
+  const rows = await fetchStakeFromServerPoll(address, signal);
+  if (!rows?.length) return [];
+  return priceStakeRows(rows, solPrice);
+}
+
+export function hasNativeSolStake(rows) {
+  return rows.some((r) => r.chainId === 'solana' && r.kind === 'staking' && r.protocol === 'Native stake');
 }
 
 function sanitizeIcon(url) {
@@ -587,14 +610,14 @@ export async function lookupSolanaAddress(address, { signal } = {}) {
   const tokenSources = new Set();
   const warm = warmProxy(signal);
 
-  const [lamports, solPrice, tokenRows] = await Promise.all([
+  const [lamports, solPrice, stakeRows, tokenRows] = await Promise.all([
     rpcCall('getBalance', [addr], signal, rpcBalanceUrls()),
     fetchSolPrice(signal),
+    scanNativeStake(addr, null, signal),
     scanTokens(addr, null, signal, tokenSources),
   ]);
 
   await warm.catch(() => {});
-  const stakeRows = await scanNativeStake(addr, solPrice, signal);
 
   tokenSources.forEach((s) => usedSources.add(s));
   if (solPrice != null) usedSources.add('jupiter');
