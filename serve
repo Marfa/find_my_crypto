@@ -1,6 +1,26 @@
 #!/usr/bin/env ruby
 # ponytail: stdlib WEBrick — local proxies for CORS-blocked chain APIs
-require 'webrick'
+
+gemfile = File.expand_path('Gemfile', __dir__)
+if File.exist?(gemfile)
+  ENV['BUNDLE_GEMFILE'] = gemfile
+  begin
+    require 'bundler/setup'
+  rescue StandardError
+    # lockfile/ruby mismatch locally, or bundler unavailable — fall through
+  end
+end
+
+begin
+  require 'webrick'
+rescue LoadError
+  require 'bundler/inline'
+  gemfile(true) do
+    source 'https://rubygems.org'
+    gem 'webrick', '~> 1.8'
+  end
+  require 'webrick'
+end
 require 'net/http'
 require 'uri'
 require 'json'

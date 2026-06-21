@@ -1,4 +1,6 @@
 # Deploy API proxy on Render (free tier). See README for fmc-api-base on GitHub Pages.
+# If sync leaves old build/start commands, set them in the Render dashboard:
+#   Build: bundle install   Start: bundle exec ruby serve
 services:
   - type: web
     name: find-my-crypto-api
