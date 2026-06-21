@@ -243,8 +243,16 @@ input[type='number']:focus {
 .search-box {
   display: flex;
   gap: 0.65rem;
-  margin-bottom: 1.25rem;
+  margin-bottom: 0.45rem;
   padding: 0.85rem;
+}
+
+.search-slow {
+  margin: 0 0 1.25rem;
+  padding: 0 0.85rem;
+  font-size: 0.88rem;
+  color: var(--muted);
+  text-align: right;
 }
 
 .search-box input {

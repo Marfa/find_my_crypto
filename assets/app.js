@@ -17,6 +17,7 @@ const summary = document.getElementById('summary');
 const results = document.getElementById('results');
 const tbody = document.getElementById('tbody');
 const submitBtn = document.getElementById('submit-btn');
+const searchSlow = document.getElementById('search-slow');
 const hideSmall = document.getElementById('hide-small');
 const hideThreshold = document.getElementById('hide-threshold');
 const footerSources = document.getElementById('footer-sources');
@@ -36,6 +37,23 @@ function showMessage(text, kind = 'error') {
 
 function hideMessage() {
   msg.classList.add('hidden');
+}
+
+let searchSlowTimer;
+
+function hideSearchSlow() {
+  clearTimeout(searchSlowTimer);
+  searchSlowTimer = null;
+  searchSlow?.classList.add('hidden');
+}
+
+function armSearchSlowHint() {
+  hideSearchSlow();
+  searchSlowTimer = setTimeout(() => {
+    if (!submitBtn.disabled) return;
+    searchSlow.textContent = t('searchSlow');
+    searchSlow.classList.remove('hidden');
+  }, 5000);
 }
 
 function esc(s) {
@@ -117,12 +135,14 @@ function showSources(ids) {
 
 async function runSearch(address) {
   hideMessage();
+  hideSearchSlow();
   hideSources();
   abort?.abort();
   abort = new AbortController();
 
   submitBtn.disabled = true;
   submitBtn.innerHTML = `<span class="spinner"></span> ${t('searching')}`;
+  armSearchSlowHint();
 
   try {
     const data = await lookupWallet(address, { signal: abort.signal });
@@ -151,6 +171,7 @@ async function runSearch(address) {
     hideSources();
     showMessage(e.message === 'invalid_address' ? t('invalidAddress') : t('error'));
   } finally {
+    hideSearchSlow();
     submitBtn.disabled = false;
     submitBtn.textContent = t('search');
   }
@@ -187,6 +208,9 @@ document.addEventListener('fmc:langchange', () => {
   apply();
   refreshToolbar({ t });
   if (!submitBtn.disabled) submitBtn.textContent = t('search');
+  if (searchSlow && !searchSlow.classList.contains('hidden')) {
+    searchSlow.textContent = t('searchSlow');
+  }
   if (allRows.length) renderTable();
   if (lastSourcesUsed.length) showSources(lastSourcesUsed);
 });
